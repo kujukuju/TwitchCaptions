@@ -1,9 +1,10 @@
 
 ## Setup
 
-1. Download and install tesseract OCR using the "64 bit latest installer".
+## Run
 
-https://github.com/UB-Mannheim/tesseract/wiki
+Open Live Captions on windows.
 
-2. Install tesseract and choose the "additional language data" to include whatever language.
+It works best with white on black background, but it doesn't really matter.
+
 
