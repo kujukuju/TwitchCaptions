@@ -1,0 +1,70 @@
+
+<html>
+    <head>
+        <style>
+            html, body {
+                margin: 0;
+                padding: 0;
+
+                color: #ffffff;
+                font-size: 24px;
+            }
+
+            div {
+                height: 36px;
+                line-height: 36px;
+            }
+        </style>
+        <script>
+            setInterval(async () => {
+                try {
+                    const request = await fetch("http://localhost:9000/captions");
+                    const json = await request.json();
+
+                    const captured = [];
+                    const translated = [];
+
+                    for (let i = 0; i < json.length; i += 2) {
+                        captured.push(json[i]);
+                        translated.push(json[i + 1]);
+                    }
+
+                    const container = document.getElementById('container');
+                    while (container.firstChild) {
+                        container.removeChild(container.firstChild);
+                    }
+
+                    const capturedElements = [];
+                    const translatedElements = [];
+
+                    for (let i = 0; i < captured.length; i++) {
+                        const capturedElement = document.createElement('div');
+                        const translatedElement = document.createElement('div');
+
+                        capturedElement.innerText = captured[i];
+                        translatedElement.innerText = translated[i];
+
+                        capturedElements.push(capturedElement);
+                        translatedElements.push(translatedElement);
+                    }
+
+                    for (let i = 0; i < capturedElements.length; i++) {
+                        container.appendChild(capturedElements[i]);
+                    }
+
+                    const divider = document.createElement('br');
+                    container.appendChild(divider);
+
+                    for (let i = 0; i < translatedElements.length; i++) {
+                        container.appendChild(translatedElements[i]);
+                    }
+                } catch (e) {}
+            }, 100);
+        </script>
+    </head>
+    <body>
+        <div id="container">
+            
+        </div>
+    </body>
+</html>
