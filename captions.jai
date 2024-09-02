@@ -11,6 +11,7 @@
 #import "stb_image_write";
 #import "KodaMicroHttp";
 #import "Thread";
+#import "WhisperJai";
 
 GetWindowTextA :: (hwnd: HWND, lpstring: LPSTR, max: s32) -> s32 #foreign user32;
 CreateDIBSection :: (hdc: HDC, bmi: *BITMAPINFO, usage: u32, ppvBits: **void, hSection: HANDLE, offset: DWORD) -> HBITMAP #foreign gdi;
@@ -220,8 +221,19 @@ process_lines :: (lines: [] Unicode) {
         }
     }
 
+    is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
+        line_string := get_string(line);
+        captured_string := to_string(*captured);
+        similar := line_string == captured_string;
+        similar = similar || begins_with_nocase(line_string, captured_string);
+        similar = similar || begins_with_nocase(captured_string, line_string);
+        similar = similar || ends_with_nocase(line_string, captured_string);
+        similar = similar || ends_with_nocase(captured_string, line_string);
+        return similar;
+    }
+
     if captured_lines.count > 0 && lines.count > 0 {
-        if first_non_persisting_index >= 0 && get_string(lines[0]) != to_string(*captured_lines[first_non_persisting_index]) {
+        if first_non_persisting_index >= 0 && !is_similar(lines[0], captured_lines[first_non_persisting_index]) {
             array_add(*newly_captured_lines, captured_lines[first_non_persisting_index]);
             array_add(*newly_changed_times, changed_times[first_non_persisting_index]);
             array_add(*newly_translated_lines, translated_lines[first_non_persisting_index]);

@@ -1,4 +1,8 @@
 
+## Plans
+
+Implement https://github.com/ggerganov/whisper.cpp instead of stealing the Live Captions window + tesseract.
+
 ## Setup
 
 ## Run
