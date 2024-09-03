@@ -22,14 +22,14 @@ user32 :: #system_library "user32";
 gdi :: #system_library "Gdi32";
 crt :: #system_library "msvcrt";
 
-tesseract_path :: "Tesseract-OCR/tesseract.exe";
-
 replacement_line := false;
 captured_lines: [..] FixedString(4096);
+captured_indices: [..] int;
 changed_times: [..] float64;
 translated_lines: [..] FixedString(4096);
 translated: [..] bool;
-// persisting: [..] bool;
+
+next_index := 0;
 
 deepl_secret: string;
 
@@ -102,6 +102,9 @@ main :: () {
 
         append(*builder, "[");
         for *line, index: captured_lines {
+            number_string := create_fixed_string(captured_indices[index]);
+            append(*builder, to_string(*number_string));
+            append(*builder, ",");
             append(*builder, "\"");
             append(*builder, to_string(line));
             append(*builder, "\",\"");
@@ -162,12 +165,7 @@ read_caption_lines :: () {
             }
         }
 
-        replacement := true;
-        if !replacement_line {
-            replacement = false;
-        }
         final_line := real_line.count >= 2 && real_line[real_line.count - 2] == 13 && real_line[real_line.count - 1] == 10;
-        replacement_line = !final_line;
 
         while real_line.count >= 1 && (real_line[0] == 10 || real_line[0] == 13 || real_line[0] == 32) {
             real_line.data += 1;
@@ -185,6 +183,18 @@ read_caption_lines :: () {
         if !include_notes && real_line[0] == #char "(" || real_line[0] == #char "[" {
             continue;
         }
+        
+        replacement := true;
+        if !replacement_line {
+            replacement = false;
+        }
+        replacement_line = !final_line;
+
+        print("% %\n", replacement_line, real_line);
+        for i: 0..line.count - 1 {
+            print("% ", line[i]);
+        }
+        print("\n\n");
 
         fixed_line := create_fixed_string(real_line, 4096);
 
@@ -197,9 +207,12 @@ read_caption_lines :: () {
             }
         } else {
             array_add(*captured_lines, fixed_line);
+            array_add(*captured_indices, next_index);
             array_add(*changed_times, time);
             array_add(*translated_lines, FixedString(4096).{});
             array_add(*translated, false);
+
+            next_index += 1;
         }
     }
 
@@ -210,144 +223,12 @@ read_caption_lines :: () {
 
     while captured_lines.count > 3 {
         array_ordered_remove_by_index(*captured_lines, 0);
+        array_ordered_remove_by_index(*captured_indices, 0);
         array_ordered_remove_by_index(*changed_times, 0);
         array_ordered_remove_by_index(*translated_lines, 0);
         array_ordered_remove_by_index(*translated, 0);
     }
 }
-
-// get_text :: () {
-//     lines: [..] FixedString(4096);
-//     lines.allocator = temp;
-
-//     start_i := max(caption_file_lines.count - 4, 0);
-//     for i: start_i..caption_file_lines.count - 1 {
-//         array_add(*lines, caption_file_lines[i]);
-//     }
-
-//     process_lines(lines);
-// }
-
-// is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
-//     fixed_line := create_fixed_string(get_string(line), 4096);
-//     return is_similar(fixed_line, captured);
-// }
-
-// is_similar :: (line1: FixedString(4096), line2: FixedString(4096)) -> bool {
-//     line1_string := to_string(*line1);
-//     line2_string := to_string(*line2);
-//     similar := line1_string == line2_string;
-
-//     shorter_line1 := line1_string;
-//     shorter_line2 := line2_string;
-//     if shorter_line1.count >= 4 && shorter_line2.count >= 4 {
-//         shorter_line1.count /= 2;
-//         shorter_line2.count /= 2;
-//     }
-//     similar = similar || begins_with_nocase(line1_string, shorter_line2);
-//     similar = similar || begins_with_nocase(line2_string, shorter_line1);
-
-//     return similar;
-// }
-
-// process_lines :: (lines: [] FixedString(4096)) {
-//     lock(*mutex);
-//     defer unlock(*mutex);
-
-//     // when you can't find the first captured_line anymore we will push it into the beginning
-//     // actually... we will always maintain one translated line that's no longer found anywhere
-
-//     newly_captured_lines: [..] FixedString(4096);
-//     newly_changed_times: [..] float64;
-//     newly_translated_lines: [..] FixedString(4096);
-//     newly_translated: [..] bool;
-//     newly_persisting: [..] bool;
-
-//     time := seconds_since_init() * 1000;
-
-//     first_non_persisting_index := -1;
-//     for captured_line, index: captured_lines {
-//         if !persisting[index] {
-//             first_non_persisting_index = index;
-//             break;
-//         }
-//     }
-
-//     first_persisting_index := -1;
-//     for captured_line, index: captured_lines {
-//         if persisting[index] {
-//             first_persisting_index = index;
-//             break;
-//         }
-//     }
-
-//     if captured_lines.count > 0 && lines.count > 0 {
-//         if first_non_persisting_index >= 0 && !is_similar(lines[0], captured_lines[first_non_persisting_index]) {
-//             array_add(*newly_captured_lines, captured_lines[first_non_persisting_index]);
-//             array_add(*newly_changed_times, changed_times[first_non_persisting_index]);
-//             array_add(*newly_translated_lines, translated_lines[first_non_persisting_index]);
-//             array_add(*newly_translated, translated[first_non_persisting_index]);
-//             array_add(*newly_persisting, true);
-//         } else if first_persisting_index >= 0 {
-//             array_add(*newly_captured_lines, captured_lines[first_persisting_index]);
-//             array_add(*newly_changed_times, changed_times[first_persisting_index]);
-//             array_add(*newly_translated_lines, translated_lines[first_persisting_index]);
-//             array_add(*newly_translated, translated[first_persisting_index]);
-//             array_add(*newly_persisting, true);
-//         }
-//     }
-
-//     for *line: lines {
-//         // this is checking if the exact line already exists and it will copy it
-//         exists_index := -1;
-//         for *captured_line, index: captured_lines {
-//             if to_string(line) == to_string(captured_line) {
-//                 exists_index = index;
-//                 break;
-//             }
-//         }
-
-//         // this is checking if the line partially existed before, and it will keep the old translation
-//         partial_index := -1;
-//         if exists_index == -1 {
-//             for *captured_line, index: captured_lines {
-//                 if starts_with(to_string(line), to_string(captured_line)) {
-//                     partial_index = index;
-//                     break;
-//                 }
-//             }
-//         }
-
-//         array_add(*newly_captured_lines, line);
-//         if exists_index >= 0 {
-//             array_add(*newly_changed_times, changed_times[exists_index]);
-//             array_add(*newly_translated_lines, translated_lines[exists_index]);
-//             array_add(*newly_translated, translated[exists_index]);
-//             array_add(*newly_persisting, false);
-//         } else if partial_index >= 0 {
-//             array_add(*newly_changed_times, time);
-//             array_add(*newly_translated_lines, translated_lines[partial_index]);
-//             array_add(*newly_translated, false);
-//             array_add(*newly_persisting, false);
-//         } else {
-//             array_add(*newly_changed_times, time);
-//             array_add(*newly_translated_lines, FixedString(4096).{});
-//             array_add(*newly_translated, false);
-//             array_add(*newly_persisting, false);
-//         }
-//     }
-
-//     array_free(captured_lines);
-//     array_free(changed_times);
-//     array_free(translated_lines);
-//     array_free(translated);
-//     array_free(persisting);
-//     captured_lines = newly_captured_lines;
-//     changed_times = newly_changed_times;
-//     translated_lines = newly_translated_lines;
-//     translated = newly_translated;
-//     persisting = newly_persisting;
-// }
 
 translate_text :: () {
     time := seconds_since_init() * 1000;

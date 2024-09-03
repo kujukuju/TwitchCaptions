@@ -12,63 +12,109 @@
                 font-size: 24px;
             }
 
-            div {
+            div div {
                 height: 36px;
                 line-height: 36px;
 
+                opacity: 0;
+                filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0));
+
+                transition: height 400ms ease, opacity 400ms ease, filter 400ms ease;
+            }
+
+            div div.expanded {
+                height: 36px;
+                opacity: 1;
                 filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.75));
             }
         </style>
         <script>
+            let pending = false;
             setInterval(async () => {
+                if (pending) {
+                    return;
+                }
+                pending = true;
+                
                 try {
                     const request = await fetch("http://localhost:9000/captions");
                     const json = await request.json();
 
+                    const indices = [];
                     const captured = [];
                     const translated = [];
 
-                    for (let i = 0; i < json.length; i += 2) {
-                        captured.push(json[i]);
-                        translated.push(json[i + 1]);
+                    for (let i = 0; i < json.length; i += 3) {
+                        indices.push(json[i])
+                        captured.push(json[i + 1]);
+                        translated.push(json[i + 2]);
                     }
+
+                    const dividerElement = document.getElementById('divider');
 
                     const container = document.getElementById('container');
-                    while (container.firstChild) {
-                        container.removeChild(container.firstChild);
-                    }
+                    let child = container.firstElementChild;
+                    while (child) {
+                        const nextChild = child.nextElementSibling;
 
-                    const capturedElements = [];
-                    const translatedElements = [];
+                        const index = Number.parseInt(child.dataset.index);
+                        const found = indices.findIndex(i => i === index) >= 0 || child == dividerElement;
+                        if (!found) {
+                            container.removeChild(child);
+                        }
+
+                        child = nextChild;
+                    }
 
                     for (let i = 0; i < captured.length; i++) {
-                        const capturedElement = document.createElement('div');
-                        const translatedElement = document.createElement('div');
+                        let found = false;
+                        
+                        let child = container.firstElementChild;
+                        let capturedChild = null;
+                        let translatedChild = null;
+                        while (child) {
+                            if (Number.parseInt(child.dataset.index) === indices[i] && !capturedChild) {
+                                capturedChild = child;
+                            } else if (Number.parseInt(child.dataset.index) === indices[i] && !translatedChild) {
+                                translatedChild = child;
+                            }
 
-                        capturedElement.innerText = captured[i];
-                        translatedElement.innerText = translated[i];
+                            child = child.nextElementSibling;
+                        }
 
-                        capturedElements.push(capturedElement);
-                        translatedElements.push(translatedElement);
-                    }
+                        if (!capturedChild && !translatedChild) {
+                            const capturedElement = document.createElement('div');
+                            capturedElement.innerText = captured[i];
+                            capturedElement.dataset.index = indices[i];
+                            container.insertBefore(capturedElement, dividerElement);
 
-                    for (let i = 0; i < capturedElements.length; i++) {
-                        container.appendChild(capturedElements[i]);
-                    }
+                            const translatedElement = document.createElement('div');
+                            translatedElement.innerText = translated[i];
+                            translatedElement.dataset.index = indices[i];
+                            container.appendChild(translatedElement);
 
-                    const divider = document.createElement('br');
-                    container.appendChild(divider);
-
-                    for (let i = 0; i < translatedElements.length; i++) {
-                        container.appendChild(translatedElements[i]);
+                            setTimeout(() => {
+                                capturedElement.classList.add('expanded');
+                                translatedElement.classList.add('expanded');
+                            }, 50);
+                        } else {
+                            if (capturedChild.innerText !== captured[i]) {
+                                capturedChild.innerText = captured[i];
+                            }
+                            if (translatedChild.innerText !== translated[i]) {
+                                translatedChild.innerText = translated[i];
+                            }
+                        }
                     }
                 } catch (e) {}
+
+                pending = false;
             }, 100);
         </script>
     </head>
     <body>
         <div id="container">
-            
+            <br id="divider" />
         </div>
     </body>
 </html>
