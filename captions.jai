@@ -24,11 +24,12 @@ crt :: #system_library "msvcrt";
 
 tesseract_path :: "Tesseract-OCR/tesseract.exe";
 
+replacement_line := false;
 captured_lines: [..] FixedString(4096);
 changed_times: [..] float64;
 translated_lines: [..] FixedString(4096);
 translated: [..] bool;
-persisting: [..] bool;
+// persisting: [..] bool;
 
 deepl_secret: string;
 
@@ -40,18 +41,21 @@ mutex: Mutex;
 translation_delay :: 50;
 translation_stable_delay :: 500;
 
-caption_file: File;
-caption_file_last_line_start: int;
-caption_file_lines: [..] FixedString(4096);
+include_notes :: false;
+
+command_lines: [..] string;
+command_mutex: Mutex;
 
 main :: () {
     init(*mutex);
+    init(*command_mutex);
 
-    run_command("stream.exe", "-m", "ggml-medium.en.bin", "-l", "en", "--step", "1200", "--length", "10000", capture_and_return_output = true);
-
-    caption_file_open: bool;
-    caption_file, caption_file_open = file_open("captions.txt", for_writing = false, keep_existing_content = true, log_errors = true);
-    assert(caption_file_open, "Could not open caption file.\n");
+    thread: Thread;
+    thread_init(*thread, (thread: *Thread) -> s64 {
+        run_command_continuous("stream.exe", "-m", "ggml-medium.en.bin", "-l", "en", "--step", "1200", "--length", "10000", lines = *command_lines, mutex = *command_mutex, capture_and_return_output = true);
+        return 0;
+    });
+    thread_start(*thread);
 
     server := create_server(9000);
     server.extra_headers = .[
@@ -129,7 +133,6 @@ main :: () {
         reset_temporary_storage();
         
         read_caption_lines();
-        get_text();
         translate_text();
 
         sleep_milliseconds(translation_delay);
@@ -137,199 +140,214 @@ main :: () {
 }
 
 read_caption_lines :: () {
-    bytes: [..] u8;
-    bytes.allocator = temp;
+    lock(*command_mutex);
+    defer unlock(*command_mutex);
 
-    file_set_position(caption_file, caption_file_last_line_start);
-    read_count := 1;
-    while read_count > 0 {
-        array_reserve(*bytes, bytes.allocated + 4096);
+    lock(*mutex);
+    defer unlock(*mutex);
 
-        read_success: bool;
-        read_success, read_count = file_read(caption_file, bytes.data + bytes.count, bytes.allocated - bytes.count);
-        if !read_success {
-            print("Could not read captions file.\n");
-        }
+    time := seconds_since_init() * 1000;
 
-        bytes.count += read_count;
-    }
+    for line: command_lines {
+        real_line := line;
 
-    unicode: Unicode;
-    lines, last_newline := split(unicode,, temp);
-    
-    if last_newline != -1 {
-        caption_file_last_line_start += last_newline + 1;
-    }
-
-    fixed_lines: [..] FixedString(4096);
-    fixed_lines.allocator = temp;
-    for line: lines {
-        if line.count == 0 {
-            continue;
-        }
-
-        array_add(*fixed_lines, create_fixed_string(get_string(line), 4096));
-    }
-
-    // remove all lines that match the last captured line
-    if caption_file_lines.count > 0 {
         i := 0;
-        while i < fixed_lines.count {
-            if is_similar(fixed_lines[i], caption_file_lines[fixed_lines.count - 1]) {
-                array_ordered_remove_by_index(*fixed_lines, i);
+        while i < real_line.count - 4 {
+            if real_line[i] == 27 && real_line[i + 1] == 91 && real_line[i + 2] == 50 && real_line[i + 3] == 75 {
+                real_line.data += i + 4;
+                real_line.count -= i + 4;
+                i = 0;
             } else {
                 i += 1;
             }
         }
-    }
 
-    for fixed_line: fixed_lines {
-        array_add(*caption_file_lines, fixed_line);
-    }
-
-    builder: String_Builder;
-    for line: caption_file_lines {
-        append(*builder, to_string(*line));
-        append(*builder, "\n");
-    }
-
-    builder_string := builder_to_string(*builder);
-    defer free(builder_string);
-    write_entire_file("captured_file_lines.txt", builder_string);
-}
-
-get_text :: () {
-    lines: [..] FixedString(4096);
-    lines.allocator = temp;
-
-    start_i := max(caption_file_lines.count - 4, 0);
-    for i: start_i..caption_file_lines.count - 1 {
-        array_add(*lines, caption_file_lines[i]);
-    }
-
-    process_lines(lines);
-}
-
-is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
-    fixed_line := create_fixed_string(get_string(line), 4096);
-    return is_similar(fixed_line, captured);
-}
-
-is_similar :: (line1: FixedString(4096), line2: FixedString(4096)) -> bool {
-    line1_string := to_string(*line1);
-    line2_string := to_string(*line2);
-    similar := line1_string == line2_string;
-
-    shorter_line1 := line1_string;
-    shorter_line2 := line2_string;
-    if shorter_line1.count >= 4 && shorter_line2.count >= 4 {
-        shorter_line1.count /= 2;
-        shorter_line2.count /= 2;
-    }
-    similar = similar || begins_with_nocase(line1_string, shorter_line2);
-    similar = similar || begins_with_nocase(line2_string, shorter_line1);
-
-    return similar;
-}
-
-process_lines :: (lines: [] FixedString(4096)) {
-    lock(*mutex);
-    defer unlock(*mutex);
-
-    // when you can't find the first captured_line anymore we will push it into the beginning
-    // actually... we will always maintain one translated line that's no longer found anywhere
-
-    newly_captured_lines: [..] FixedString(4096);
-    newly_changed_times: [..] float64;
-    newly_translated_lines: [..] FixedString(4096);
-    newly_translated: [..] bool;
-    newly_persisting: [..] bool;
-
-    time := seconds_since_init() * 1000;
-
-    first_non_persisting_index := -1;
-    for captured_line, index: captured_lines {
-        if !persisting[index] {
-            first_non_persisting_index = index;
-            break;
+        replacement := true;
+        if !replacement_line {
+            replacement = false;
         }
-    }
+        final_line := real_line.count >= 2 && real_line[real_line.count - 2] == 13 && real_line[real_line.count - 1] == 10;
+        replacement_line = !final_line;
 
-    first_persisting_index := -1;
-    for captured_line, index: captured_lines {
-        if persisting[index] {
-            first_persisting_index = index;
-            break;
+        while real_line.count >= 1 && (real_line[0] == 10 || real_line[0] == 13 || real_line[0] == 32) {
+            real_line.data += 1;
+            real_line.count -= 1;
         }
-    }
 
-    if captured_lines.count > 0 && lines.count > 0 {
-        if first_non_persisting_index >= 0 && !is_similar(lines[0], captured_lines[first_non_persisting_index]) {
-            array_add(*newly_captured_lines, captured_lines[first_non_persisting_index]);
-            array_add(*newly_changed_times, changed_times[first_non_persisting_index]);
-            array_add(*newly_translated_lines, translated_lines[first_non_persisting_index]);
-            array_add(*newly_translated, translated[first_non_persisting_index]);
-            array_add(*newly_persisting, true);
-        } else if first_persisting_index >= 0 {
-            array_add(*newly_captured_lines, captured_lines[first_persisting_index]);
-            array_add(*newly_changed_times, changed_times[first_persisting_index]);
-            array_add(*newly_translated_lines, translated_lines[first_persisting_index]);
-            array_add(*newly_translated, translated[first_persisting_index]);
-            array_add(*newly_persisting, true);
+        while real_line.count >= 1 && (real_line[real_line.count - 1] == 10 || real_line[real_line.count - 1] == 13 || real_line[real_line.count - 1] == 32) {
+            real_line.count -= 1;
         }
-    }
 
-    for *line: lines {
-        // this is checking if the exact line already exists and it will copy it
-        exists_index := -1;
-        for *captured_line, index: captured_lines {
-            if to_string(line) == to_string(captured_line) {
-                exists_index = index;
-                break;
+        if real_line.count == 0 {
+            continue;
+        }
+
+        if !include_notes && real_line[0] == #char "(" || real_line[0] == #char "[" {
+            continue;
+        }
+
+        fixed_line := create_fixed_string(real_line, 4096);
+
+        if replacement && captured_lines.count > 0 {
+            exact_match := captured_lines.count > 0 && captured_lines[captured_lines.count - 1] == fixed_line;
+            if !exact_match {
+                captured_lines[captured_lines.count - 1] = fixed_line;
+                changed_times[captured_lines.count - 1] = time;
+                translated[captured_lines.count - 1] = false;
             }
-        }
-
-        // this is checking if the line partially existed before, and it will keep the old translation
-        partial_index := -1;
-        if exists_index == -1 {
-            for *captured_line, index: captured_lines {
-                if starts_with(to_string(line), to_string(captured_line)) {
-                    partial_index = index;
-                    break;
-                }
-            }
-        }
-
-        array_add(*newly_captured_lines, line);
-        if exists_index >= 0 {
-            array_add(*newly_changed_times, changed_times[exists_index]);
-            array_add(*newly_translated_lines, translated_lines[exists_index]);
-            array_add(*newly_translated, translated[exists_index]);
-            array_add(*newly_persisting, false);
-        } else if partial_index >= 0 {
-            array_add(*newly_changed_times, time);
-            array_add(*newly_translated_lines, translated_lines[partial_index]);
-            array_add(*newly_translated, false);
-            array_add(*newly_persisting, false);
         } else {
-            array_add(*newly_changed_times, time);
-            array_add(*newly_translated_lines, FixedString(4096).{});
-            array_add(*newly_translated, false);
-            array_add(*newly_persisting, false);
+            array_add(*captured_lines, fixed_line);
+            array_add(*changed_times, time);
+            array_add(*translated_lines, FixedString(4096).{});
+            array_add(*translated, false);
         }
     }
 
-    array_free(captured_lines);
-    array_free(changed_times);
-    array_free(translated_lines);
-    array_free(translated);
-    array_free(persisting);
-    captured_lines = newly_captured_lines;
-    changed_times = newly_changed_times;
-    translated_lines = newly_translated_lines;
-    translated = newly_translated;
-    persisting = newly_persisting;
+    for line: command_lines {
+        free(line);
+    }
+    command_lines.count = 0;
+
+    while captured_lines.count > 3 {
+        array_ordered_remove_by_index(*captured_lines, 0);
+        array_ordered_remove_by_index(*changed_times, 0);
+        array_ordered_remove_by_index(*translated_lines, 0);
+        array_ordered_remove_by_index(*translated, 0);
+    }
 }
+
+// get_text :: () {
+//     lines: [..] FixedString(4096);
+//     lines.allocator = temp;
+
+//     start_i := max(caption_file_lines.count - 4, 0);
+//     for i: start_i..caption_file_lines.count - 1 {
+//         array_add(*lines, caption_file_lines[i]);
+//     }
+
+//     process_lines(lines);
+// }
+
+// is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
+//     fixed_line := create_fixed_string(get_string(line), 4096);
+//     return is_similar(fixed_line, captured);
+// }
+
+// is_similar :: (line1: FixedString(4096), line2: FixedString(4096)) -> bool {
+//     line1_string := to_string(*line1);
+//     line2_string := to_string(*line2);
+//     similar := line1_string == line2_string;
+
+//     shorter_line1 := line1_string;
+//     shorter_line2 := line2_string;
+//     if shorter_line1.count >= 4 && shorter_line2.count >= 4 {
+//         shorter_line1.count /= 2;
+//         shorter_line2.count /= 2;
+//     }
+//     similar = similar || begins_with_nocase(line1_string, shorter_line2);
+//     similar = similar || begins_with_nocase(line2_string, shorter_line1);
+
+//     return similar;
+// }
+
+// process_lines :: (lines: [] FixedString(4096)) {
+//     lock(*mutex);
+//     defer unlock(*mutex);
+
+//     // when you can't find the first captured_line anymore we will push it into the beginning
+//     // actually... we will always maintain one translated line that's no longer found anywhere
+
+//     newly_captured_lines: [..] FixedString(4096);
+//     newly_changed_times: [..] float64;
+//     newly_translated_lines: [..] FixedString(4096);
+//     newly_translated: [..] bool;
+//     newly_persisting: [..] bool;
+
+//     time := seconds_since_init() * 1000;
+
+//     first_non_persisting_index := -1;
+//     for captured_line, index: captured_lines {
+//         if !persisting[index] {
+//             first_non_persisting_index = index;
+//             break;
+//         }
+//     }
+
+//     first_persisting_index := -1;
+//     for captured_line, index: captured_lines {
+//         if persisting[index] {
+//             first_persisting_index = index;
+//             break;
+//         }
+//     }
+
+//     if captured_lines.count > 0 && lines.count > 0 {
+//         if first_non_persisting_index >= 0 && !is_similar(lines[0], captured_lines[first_non_persisting_index]) {
+//             array_add(*newly_captured_lines, captured_lines[first_non_persisting_index]);
+//             array_add(*newly_changed_times, changed_times[first_non_persisting_index]);
+//             array_add(*newly_translated_lines, translated_lines[first_non_persisting_index]);
+//             array_add(*newly_translated, translated[first_non_persisting_index]);
+//             array_add(*newly_persisting, true);
+//         } else if first_persisting_index >= 0 {
+//             array_add(*newly_captured_lines, captured_lines[first_persisting_index]);
+//             array_add(*newly_changed_times, changed_times[first_persisting_index]);
+//             array_add(*newly_translated_lines, translated_lines[first_persisting_index]);
+//             array_add(*newly_translated, translated[first_persisting_index]);
+//             array_add(*newly_persisting, true);
+//         }
+//     }
+
+//     for *line: lines {
+//         // this is checking if the exact line already exists and it will copy it
+//         exists_index := -1;
+//         for *captured_line, index: captured_lines {
+//             if to_string(line) == to_string(captured_line) {
+//                 exists_index = index;
+//                 break;
+//             }
+//         }
+
+//         // this is checking if the line partially existed before, and it will keep the old translation
+//         partial_index := -1;
+//         if exists_index == -1 {
+//             for *captured_line, index: captured_lines {
+//                 if starts_with(to_string(line), to_string(captured_line)) {
+//                     partial_index = index;
+//                     break;
+//                 }
+//             }
+//         }
+
+//         array_add(*newly_captured_lines, line);
+//         if exists_index >= 0 {
+//             array_add(*newly_changed_times, changed_times[exists_index]);
+//             array_add(*newly_translated_lines, translated_lines[exists_index]);
+//             array_add(*newly_translated, translated[exists_index]);
+//             array_add(*newly_persisting, false);
+//         } else if partial_index >= 0 {
+//             array_add(*newly_changed_times, time);
+//             array_add(*newly_translated_lines, translated_lines[partial_index]);
+//             array_add(*newly_translated, false);
+//             array_add(*newly_persisting, false);
+//         } else {
+//             array_add(*newly_changed_times, time);
+//             array_add(*newly_translated_lines, FixedString(4096).{});
+//             array_add(*newly_translated, false);
+//             array_add(*newly_persisting, false);
+//         }
+//     }
+
+//     array_free(captured_lines);
+//     array_free(changed_times);
+//     array_free(translated_lines);
+//     array_free(translated);
+//     array_free(persisting);
+//     captured_lines = newly_captured_lines;
+//     changed_times = newly_changed_times;
+//     translated_lines = newly_translated_lines;
+//     translated = newly_translated;
+//     persisting = newly_persisting;
+// }
 
 translate_text :: () {
     time := seconds_since_init() * 1000;
@@ -642,4 +660,121 @@ file_open_shared :: (name: string, for_writing := false, keep_existing_content :
     file.handle = handle;
 
     return file, true;
+}
+
+run_command_continuous :: (args: .. string, lines: *[..] string, mutex: *Mutex, working_directory := "", capture_and_return_output := false, print_captured_output := false, timeout_ms := -1, arg_quoting := Process_Argument_Quoting.QUOTE_IF_NEEDED) -> (process_result: Process_Result, output_string := "", error_string := "", timeout_reached := false) {
+    System :: #import "System";
+
+    process: Process;
+    success := create_process(*process, .. args, working_directory, capture_and_return_output, arg_quoting);
+    if !success    return .{type = .FAILED_TO_LAUNCH};
+
+    defer deinit(*process);
+
+    output_string: string;
+    error_string : string;
+    timeout_reached: bool;
+
+    exit_timeout_ms := timeout_ms;
+    
+    if capture_and_return_output {
+        output_builder: String_Builder;
+        init_string_builder(*output_builder);
+        error_builder : String_Builder;
+        init_string_builder(*error_builder);
+
+        start_time := current_time_monotonic();
+        remaining_timeout_ms := timeout_ms;
+
+        while true {
+            reset(*output_builder);
+            reset(*error_builder);
+
+            output_buffer := ensure_contiguous_space_and_return_available_range(*output_builder);
+            error_buffer := ensure_contiguous_space_and_return_available_range(*error_builder);
+            success, output_bytes, error_bytes := read_from_process(*process, output_buffer, error_buffer, remaining_timeout_ms);
+
+            {
+                lock(mutex);
+                defer unlock(mutex);
+
+                out_string: string;
+                out_string.data = output_buffer.data;
+                out_string.count = output_bytes;
+                array_add(lines, copy_string(out_string));
+            }
+
+            if output_bytes {
+                advance_through_ensured_space(*output_builder, output_bytes);
+                if print_captured_output {
+                    new_data := to_string(output_buffer.data, output_bytes);
+                    write_string(new_data, to_standard_error = false);
+                }
+            }
+            if error_bytes {
+                advance_through_ensured_space(*error_builder, error_bytes);
+                if print_captured_output {
+                    new_data := to_string(error_buffer.data, error_bytes);
+                    write_string(new_data, to_standard_error = true);
+                }
+            }
+
+            if !success {
+                log_error("Could not read output of command \"%\"", get_quoted_command_string(args,, temp));
+                kill_process(*process);
+                break;
+            }
+
+            if timeout_ms >= 0 {
+                now := current_time_monotonic();
+                remaining_timeout_ms = timeout_ms - to_milliseconds(now - start_time);
+
+                if remaining_timeout_ms <= 0 {
+                    // We’ve hit a timeout! Time to kill the child. (will be reaped below)
+                    timeout_reached = true;
+                    success := kill_process(*process);
+                    if !success {
+                        error_code, error_string := System.get_error_value_and_string();
+                        log_error("Could not kill child for command \"%\": % %", get_quoted_command_string(args,, temp), error_code, error_string);
+                    }
+                    break;
+                }
+            }
+
+            if process.output.eof && process.error.eof    break;
+        }
+
+        output_string = builder_to_string(*output_builder);
+        error_string  = builder_to_string(*error_builder);
+        exit_timeout_ms = -1;
+    }
+
+    process_result: Process_Result;
+    exit_code: s32;
+    while true {
+        success, process_result = get_process_result(*process, exit_timeout_ms);
+        if !success {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not get process result for command \"%\": % %", get_quoted_command_string(args,, temp), error_code, error_string);
+            kill_process(*process);
+            process_result = .{type = .EXITED, exit_code = -1};
+            break;
+        }
+
+        if process_result.type != .STILL_RUNNING     break;
+
+        assert(exit_timeout_ms >= 0);
+        exit_timeout_ms = -1;
+        timeout_reached = true;
+        // Kill process and then try to reap it again
+        success = kill_process(*process);
+        if !success {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not kill child for command \"%\": % %", get_quoted_command_string(args,, temp), error_code, error_string);
+            process_result = .{type = .EXITED, exit_code = -1};
+            break;
+        }
+    }
+
+    return process_result, output_string, error_string, timeout_reached;
 }
