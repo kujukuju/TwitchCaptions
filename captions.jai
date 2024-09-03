@@ -180,21 +180,25 @@ read_caption_lines :: () {
             continue;
         }
 
-        if !include_notes && real_line[0] == #char "(" || real_line[0] == #char "[" {
+        is_note_char :: (char: int) -> bool {
+            return char == #char "(" ||char == #char "[" || char == #char "*";
+        }
+
+        if !include_notes && is_note_char(real_line[0]) && is_note_char(real_line[real_line.count - 1]) {
             continue;
         }
-        
+
         replacement := true;
         if !replacement_line {
             replacement = false;
         }
         replacement_line = !final_line;
 
-        print("% %\n", replacement_line, real_line);
-        for i: 0..line.count - 1 {
-            print("% ", line[i]);
-        }
-        print("\n\n");
+        // print("% %\n", replacement_line, real_line);
+        // for i: 0..line.count - 1 {
+        //     print("% ", line[i]);
+        // }
+        // print("\n\n");
 
         fixed_line := create_fixed_string(real_line, 4096);
 
@@ -265,27 +269,27 @@ translate_text :: () {
         translations: [..] JsonTranslation;
     }
 
-    result, memory, valid := json_parse(deepl_response, JsonResponse);
-    defer free(memory);
-    if !valid {
-        print("Could not translate text... %\n", desired_translations);
-        return;
+    print("Response:\n%\n", deepl_response);
+
+    translations := get_translations_from_json(get_unicode(deepl_response));
+    defer {
+        for translation: translations {
+            free(translation);
+        }
     }
 
-    if result.translations.count != desired_translations.count {
-        print("Received back incorrect number of translations... % != %\n", desired_translations.count, result.translations.count);
-        for translation: result.translations {
-            print("%\n", translation);
-        }
+    if translations.count != desired_translations.count {
+        print("Received back incorrect number of translations... % != %\n", desired_translations.count, translations.count);
+        print("%\n", deepl_response);
         return;
     }
 
     lock(*mutex);
     defer unlock(*mutex);
 
-    for translation, index: result.translations {
+    for translation, index: translations {
         translated[desired_indices[index]] = true;
-        translated_lines[desired_indices[index]] = create_fixed_string(translation.text, 4096);
+        translated_lines[desired_indices[index]] = create_fixed_string(get_string(translation), 4096);
     }
 
     print("Translations:\n---\n");
@@ -301,71 +305,91 @@ translate_text :: () {
     print("\n");
 }
 
-capture_window :: (hwnd: HWND) {
-    bytes, width, height := get_window_bytes(hwnd);
-    defer free(bytes);
+get_translations_from_json :: (response: Unicode) -> [..] Unicode {
+    translations: [..] Unicode;
+    translations.allocator = temp;
 
-    for i: 0..width * height {
-        bytes[i * 4 + 3] = 255;
+    found_translations := false;
+    inside_translations := false;
+
+    found_text := false;
+    inside_text := 0;
+
+    escape := false;
+
+    is_string :: (response: Unicode, index: int, expected: string) -> bool {
+        matches := true;
+        index_offset := 0;
+        while index + index_offset < response.count && index_offset < expected.count && matches {
+            matches = matches && response.data[index + index_offset] == expected[index_offset];
+            index_offset += 1;
+        }
+        matches = matches && index_offset == expected.count;
+        return matches;
     }
 
-    stbi_write_png("captions.png", cast(s32) width, cast(s32) height, 4, bytes, cast(s32) (4 * width));
-}
+    current_translation: string;
 
-get_window_bytes :: (hwnd: HWND) -> *u8, int, int {
-    hdcScreen := GetDC(null);
-    hdcMemDC := CreateCompatibleDC(hdcScreen);
+    for character, index: response {
+        if !found_translations && !inside_translations && is_string(response, index, "translations") {
+            found_translations = true;
+        } else if found_translations && !inside_translations && character == #char "[" {
+            found_translations = false;
+            inside_translations = true;
+        } else if inside_translations && !found_text && is_string(response, index, "text") {
+            found_text = true;
+        } else if found_text && inside_text == 0 && character == #char ":" {
+            found_text = false;
+            inside_text = 1;
+        } else if inside_text == 1 && character == #char "\"" {
+            found_text = false;
+            inside_text = 2;
 
-    screenWidth := GetSystemMetrics(SM_CXSCREEN);
-    screenHeight := GetSystemMetrics(SM_CYSCREEN);
+            current_translation.data = response.data + index + 1;
+            current_translation.count = 0;
+        } else if inside_text == 2 && character == #char "\"" && !escape {
+            inside_text = 0;
 
-    hbmScreen := CreateCompatibleBitmap(hdcScreen, screenWidth, screenHeight);
+            current_translation.count = index - (current_translation.data - response.data);
+            array_add(*translations, get_unicode(current_translation));
+        }
 
-    if (!hdcMemDC) {
-        print("CreateCompatibleDC failed: %\n", GetLastError());
-        return null, 0, 0;
+        if inside_text == 2 && character == #char "\\" {
+            escape = true;
+        } else {
+            escape = false;
+        }
     }
 
-    rcClient: RECT;
-    GetWindowRect(hwnd, *rcClient);
+    for unicode, index: translations {
+        builder: String_Builder;
+        current_line: string;
+        for character, index: unicode {
+            if !current_line.data {
+                current_line.data = unicode.data + index;
+            }
 
-    rcClient.left += 8;
-    rcClient.right -= 98;
-    rcClient.top += 8;
-    rcClient.bottom -= 8;
+            current_line.count = index - (current_line.data - unicode.data);
 
-    width := rcClient.right - rcClient.left;
-    height := rcClient.bottom - rcClient.top;
+            if index > 0 && unicode.data[index - 1] == #char "\\" && unicode.data[index] == #char "\"" {
+                current_line.count = max(current_line.count - 1, 0);
+                if current_line.count > 0 {
+                    append(*builder, current_line);
+                    current_line = "";
+                }
+                append(*builder, "\"");
+            }
+        }
 
-    SelectObject(hdcMemDC, hbmScreen);
+        current_line.count = unicode.count - (current_line.data - unicode.data);
+        if current_line.count > 0 {
+            append(*builder, current_line);
+        }
 
-    BitBlt(hdcMemDC, 0, 0, width, height, hdcScreen, rcClient.left, rcClient.top, ROP.SRCCOPY);
+        translations[index] = get_unicode(builder_to_string(*builder));
+    }
 
-    bmpScreen: BITMAP;
-    GetObjectA(hbmScreen, size_of(BITMAP), *bmpScreen);
-
-    bi: BITMAPINFOHEADER;
-    bi.biSize = size_of(BITMAPINFOHEADER);
-    bi.biWidth = width;
-    bi.biHeight = height * -1;
-    bi.biPlanes = 1;
-    bi.biBitCount = 32;
-    bi.biCompression = BI_RGB;
-    bi.biSizeImage = 0;
-    bi.biXPelsPerMeter = 0;
-    bi.biYPelsPerMeter = 0;
-    bi.biClrUsed = 0;
-    bi.biClrImportant = 0;
-
-    pPixels := alloc(4 * width * height);
-
-    GetDIBits(hdcMemDC, hbmScreen, 0, cast(u32) height, pPixels, cast(*BITMAPINFO) *bi, DIB_RGB_COLORS);
-
-    DeleteObject(hbmScreen);
-    DeleteDC(hdcMemDC);
-    ReleaseDC(hwnd, hdcScreen);
-
-    return pPixels, cast(int) width, cast(int) height;
+    return translations;
 }
 
 deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bool, string {
@@ -383,8 +407,32 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
     append(*json_builder, "{");
     append(*json_builder, "\"text\": [");
     for *line: lines {
+        unicode := get_unicode(to_string(line));
+
         append(*json_builder, "\"");
-        append(*json_builder, to_string(line));
+        current_line: string;
+        for character, character_index: unicode {
+            if !current_line.data {
+                current_line.data = unicode.data + character_index;
+            }
+            current_line.count = character_index - (current_line.data - unicode.data);
+
+            if character == #char "\"" {
+                if current_line.count > 0 {
+                    append(*json_builder, current_line);
+                    current_line = "";
+                }
+
+                append(*json_builder, "\\\"");
+            }
+        }
+        if current_line.data {
+            current_line.count = unicode.count - (current_line.data - unicode.data);
+            if current_line.count > 0 {
+                append(*json_builder, current_line);
+            }
+        }
+
         append(*json_builder, "\"");
 
         if it_index < lines.count - 1 {
@@ -394,6 +442,9 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
     append(*json_builder, "], \"target_lang\": \"JA\"}\0");
     
     json_string := builder_to_string(*json_builder);
+    defer free(json_string);
+
+    print("Request string:\n%\n", json_string);
 
     curl_easy_setopt(curl, .POSTFIELDS, json_string.data);
     curl_easy_setopt(curl, .URL, url);
@@ -419,6 +470,10 @@ write_callback :: (contents: *u8, count: u64, size: u64, builder: *String_Builde
 Unicode :: struct {
     data: *u8;
     count: int;
+}
+
+free :: (unicode: Unicode) {
+    free(unicode.data);
 }
 
 get_unicode :: (line: string) -> Unicode {

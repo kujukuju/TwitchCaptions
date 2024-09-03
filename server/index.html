@@ -10,22 +10,38 @@
 
                 color: #ffffff;
                 font-size: 24px;
+
+                /* font-family: 'Noto Sans JP', sans-serif; */
+                /* font-family: 'Noto Serif JP', serif; */
+                font-family: 'Yu Gothic', 'YuGothic', sans-serif;
+                /* font-family: 'Meiryo', sans-serif; */
             }
 
             div div {
-                height: 36px;
-                line-height: 36px;
+                max-height: 0;
+                line-height: 32px;
+                padding-top: 8px;
 
                 opacity: 0;
                 filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0));
 
-                transition: height 400ms ease, opacity 400ms ease, filter 400ms ease;
+                transition: max-height 800ms ease, opacity 400ms ease, filter 400ms ease;
+            }
+
+            div div.captured {
+                max-height: 64px;
             }
 
             div div.expanded {
-                height: 36px;
+                max-height: 64px;
                 opacity: 1;
                 filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.75));
+            }
+
+            div#container {
+                position: fixed;
+                left: 0;
+                bottom: 0;
             }
         </style>
         <script>
@@ -66,6 +82,8 @@
                         child = nextChild;
                     }
 
+                    console.log('huh');
+
                     for (let i = 0; i < captured.length; i++) {
                         let found = false;
                         
@@ -82,29 +100,50 @@
                             child = child.nextElementSibling;
                         }
 
+                        let applyCapture = !capturedChild || !capturedChild.innerText;
+                        applyCapture = applyCapture && captured[i];
+                        let applyTranslation = !translatedChild || !translatedChild.innerText;
+                        applyTranslation = applyTranslation && translated[i];
+
+                        const capturedText = captured[i] || '\u00A0';
+                        const translatedText = translated[i] || '\u00A0';
+
                         if (!capturedChild && !translatedChild) {
-                            const capturedElement = document.createElement('div');
-                            capturedElement.innerText = captured[i];
-                            capturedElement.dataset.index = indices[i];
-                            container.insertBefore(capturedElement, dividerElement);
+                            capturedChild = document.createElement('div');
+                            capturedChild.classList.add('captured');
+                            capturedChild.innerText = capturedText;
+                            capturedChild.dataset.index = indices[i];
+                            container.insertBefore(capturedChild, dividerElement);
 
-                            const translatedElement = document.createElement('div');
-                            translatedElement.innerText = translated[i];
-                            translatedElement.dataset.index = indices[i];
-                            container.appendChild(translatedElement);
-
-                            setTimeout(() => {
-                                capturedElement.classList.add('expanded');
-                                translatedElement.classList.add('expanded');
-                            }, 50);
+                            translatedChild = document.createElement('div');
+                            translatedChild.innerText = translatedText;
+                            translatedChild.dataset.index = indices[i];
+                            container.appendChild(translatedChild);
                         } else {
-                            if (capturedChild.innerText !== captured[i]) {
-                                capturedChild.innerText = captured[i];
+                            if (capturedChild.innerText !== capturedText) {
+                                capturedChild.innerText = capturedText;
                             }
-                            if (translatedChild.innerText !== translated[i]) {
-                                translatedChild.innerText = translated[i];
+                            if (translatedChild.innerText !== translatedText) {
+                                translatedChild.innerText = translatedText;
                             }
                         }
+
+                        if (applyCapture || applyTranslation) {
+                            setTimeout(() => {
+                                capturedChild.classList.add('expanded');
+                                translatedChild.classList.add('expanded');
+                            }, 10);
+                        }
+                        // if (applyCapture) {
+                        //     setTimeout(() => {
+                        //         capturedChild.classList.add('expanded');
+                        //     }, 10);
+                        // }
+                        // if (applyTranslation) {
+                        //     setTimeout(() => {
+                        //         translatedChild.classList.add('expanded');
+                        //     }, 10);
+                        // }
                     }
                 } catch (e) {}
 
