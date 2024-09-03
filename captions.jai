@@ -30,8 +30,6 @@ translated_lines: [..] FixedString(4096);
 translated: [..] bool;
 persisting: [..] bool;
 
-hwnd: HWND;
-
 deepl_secret: string;
 
 mutex: Mutex;
@@ -42,19 +40,18 @@ mutex: Mutex;
 translation_delay :: 50;
 translation_stable_delay :: 500;
 
+caption_file: File;
+caption_file_last_line_start: int;
+caption_file_lines: [..] FixedString(4096);
+
 main :: () {
-    if !file_exists(tesseract_path) {
-        print("Could not find tesseract.exe! It has to be at this path: '%'.\n", tesseract_path);
-        return;
-    }
-
-    print("Found Tesseract OCR!\n");
-
-    print("Waiting for you to click on Live Captions...\n");
-
     init(*mutex);
 
-    write_entire_file("captions.txt", "");
+    run_command("stream.exe", "-m", "ggml-medium.en.bin", "-l", "en", "--step", "1200", "--length", "10000", capture_and_return_output = true);
+
+    caption_file_open: bool;
+    caption_file, caption_file_open = file_open("captions.txt", for_writing = false, keep_existing_content = true, log_errors = true);
+    assert(caption_file_open, "Could not open caption file.\n");
 
     server := create_server(9000);
     server.extra_headers = .[
@@ -128,34 +125,10 @@ main :: () {
         return;
     }
 
-    title: [256] u8;
-    title_string: string;
-
     while true {
         reset_temporary_storage();
-
-        if !IsWindow(hwnd) {
-            hwnd = null;
-            title_string = "";
-        }
-
-        while title_string != "Live Captions" {
-            hwnd = GetForegroundWindow();
-
-            memset(title.data, 0, title.count);
-            GetWindowTextA(hwnd, title.data, title.count);
-            title_string = to_string(title.data);
-
-            if title_string == "Live Captions" {
-                print("Found Live Captions!\n");
-
-                break;
-            }
-
-            sleep_milliseconds(100);
-        }
         
-        capture_window(hwnd);
+        read_caption_lines();
         get_text();
         translate_text();
 
@@ -163,36 +136,103 @@ main :: () {
     }
 }
 
-get_text :: () {
-    result, output := run_command(tesseract_path, "captions.png", "-", "-l", "eng", capture_and_return_output = true);
-    defer free(output);
+read_caption_lines :: () {
+    bytes: [..] u8;
+    bytes.allocator = temp;
 
-    lines := split(get_unicode(output));
-    defer array_free(lines);
+    file_set_position(caption_file, caption_file_last_line_start);
+    read_count := 1;
+    while read_count > 0 {
+        array_reserve(*bytes, bytes.allocated + 4096);
 
-    for line, line_index: lines {
-        for character, character_index: line {
-            if character == #char "|" {
-                line.data[character_index] = #char "I";
-            } else if character == #char "0" {
-                line.data[character_index] = #char "O";
+        read_success: bool;
+        read_success, read_count = file_read(caption_file, bytes.data + bytes.count, bytes.allocated - bytes.count);
+        if !read_success {
+            print("Could not read captions file.\n");
+        }
+
+        bytes.count += read_count;
+    }
+
+    unicode: Unicode;
+    lines, last_newline := split(unicode,, temp);
+    
+    if last_newline != -1 {
+        caption_file_last_line_start += last_newline + 1;
+    }
+
+    fixed_lines: [..] FixedString(4096);
+    fixed_lines.allocator = temp;
+    for line: lines {
+        if line.count == 0 {
+            continue;
+        }
+
+        array_add(*fixed_lines, create_fixed_string(get_string(line), 4096));
+    }
+
+    // remove all lines that match the last captured line
+    if caption_file_lines.count > 0 {
+        i := 0;
+        while i < fixed_lines.count {
+            if is_similar(fixed_lines[i], caption_file_lines[fixed_lines.count - 1]) {
+                array_ordered_remove_by_index(*fixed_lines, i);
+            } else {
+                i += 1;
             }
         }
     }
 
-    i := 0;
-    while i < lines.count {
-        if lines[i].count == 0 {
-            array_ordered_remove_by_index(*lines, i);
-        } else {
-            i += 1;
-        }
+    for fixed_line: fixed_lines {
+        array_add(*caption_file_lines, fixed_line);
+    }
+
+    builder: String_Builder;
+    for line: caption_file_lines {
+        append(*builder, to_string(*line));
+        append(*builder, "\n");
+    }
+
+    builder_string := builder_to_string(*builder);
+    defer free(builder_string);
+    write_entire_file("captured_file_lines.txt", builder_string);
+}
+
+get_text :: () {
+    lines: [..] FixedString(4096);
+    lines.allocator = temp;
+
+    start_i := max(caption_file_lines.count - 4, 0);
+    for i: start_i..caption_file_lines.count - 1 {
+        array_add(*lines, caption_file_lines[i]);
     }
 
     process_lines(lines);
 }
 
-process_lines :: (lines: [] Unicode) {
+is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
+    fixed_line := create_fixed_string(get_string(line), 4096);
+    return is_similar(fixed_line, captured);
+}
+
+is_similar :: (line1: FixedString(4096), line2: FixedString(4096)) -> bool {
+    line1_string := to_string(*line1);
+    line2_string := to_string(*line2);
+    similar := line1_string == line2_string;
+
+    shorter_line1 := line1_string;
+    shorter_line2 := line2_string;
+    if shorter_line1.count >= 4 && shorter_line2.count >= 4 {
+        shorter_line1.count /= 2;
+        shorter_line2.count /= 2;
+    }
+    similar = similar || begins_with_nocase(line1_string, shorter_line2);
+    similar = similar || begins_with_nocase(line2_string, shorter_line1);
+
+    return similar;
+}
+
+process_lines :: (lines: [] FixedString(4096)) {
     lock(*mutex);
     defer unlock(*mutex);
 
@@ -223,17 +263,6 @@ process_lines :: (lines: [] Unicode) {
         }
     }
 
-    is_similar :: (line: Unicode, captured: FixedString(4096)) -> bool {
-        line_string := get_string(line);
-        captured_string := to_string(*captured);
-        similar := line_string == captured_string;
-        similar = similar || begins_with_nocase(line_string, captured_string);
-        similar = similar || begins_with_nocase(captured_string, line_string);
-        similar = similar || ends_with_nocase(line_string, captured_string);
-        similar = similar || ends_with_nocase(captured_string, line_string);
-        return similar;
-    }
-
     if captured_lines.count > 0 && lines.count > 0 {
         if first_non_persisting_index >= 0 && !is_similar(lines[0], captured_lines[first_non_persisting_index]) {
             array_add(*newly_captured_lines, captured_lines[first_non_persisting_index]);
@@ -250,11 +279,11 @@ process_lines :: (lines: [] Unicode) {
         }
     }
 
-    for line: lines {
+    for *line: lines {
         // this is checking if the exact line already exists and it will copy it
         exists_index := -1;
         for *captured_line, index: captured_lines {
-            if get_string(line) == to_string(captured_line) {
+            if to_string(line) == to_string(captured_line) {
                 exists_index = index;
                 break;
             }
@@ -264,14 +293,14 @@ process_lines :: (lines: [] Unicode) {
         partial_index := -1;
         if exists_index == -1 {
             for *captured_line, index: captured_lines {
-                if starts_with(get_string(line), to_string(captured_line)) {
+                if starts_with(to_string(line), to_string(captured_line)) {
                     partial_index = index;
                     break;
                 }
             }
         }
 
-        array_add(*newly_captured_lines, create_fixed_string(get_string(line), 4096));
+        array_add(*newly_captured_lines, line);
         if exists_index >= 0 {
             array_add(*newly_changed_times, changed_times[exists_index]);
             array_add(*newly_translated_lines, translated_lines[exists_index]);
@@ -504,6 +533,14 @@ get_string :: (line: Unicode) -> string {
     return output;
 }
 
+copy_unicode :: (line: Unicode) -> Unicode {
+    copied: Unicode;
+    copied.data = alloc(line.count);
+    memcmp(copied.data, line.data, line.count);
+    copied.count = line.count;
+    return copied;
+}
+
 for_expansion :: (unicode: Unicode, body: Code, flags: For_Flags) #expand {
     #assert(!(flags & .REVERSE));
     #assert(!(flags & .POINTER));
@@ -547,8 +584,9 @@ for_expansion :: (unicode: Unicode, body: Code, flags: For_Flags) #expand {
     }
 }
 
-split :: (unicode: Unicode) -> [] Unicode {
+split :: (unicode: Unicode) -> [] Unicode, last_newline_index: int {
     lines: [..] Unicode;
+    last_newline_index := -1;
 
     current_line: Unicode;
     for char, index: unicode {
@@ -560,11 +598,48 @@ split :: (unicode: Unicode) -> [] Unicode {
                     current_line = .{};
                 }
             }
+
+            last_newline_index = index;
         } else if !current_line.data {
             current_line.data = unicode.data + index;
             current_line.count = 0;
         }
     }
 
-    return lines;
+    // if current_line.data && !current_line.count {
+    //     current_line.count = unicode.count - (current_line.data - unicode.data);
+    //     array_add(*lines, current_line);
+    // }
+
+    return lines, last_newline_index;
+}
+
+
+file_open_shared :: (name: string, for_writing := false, keep_existing_content := false, log_errors := false) -> File, bool {
+    System :: #import "System";
+    #import "Windows_Utf8";
+
+    handle: HANDLE;
+    if for_writing {
+        mode: u32;
+        if keep_existing_content mode = OPEN_ALWAYS;
+        else mode = CREATE_ALWAYS;
+        handle = CreateFileW(utf8_to_wide_new(name,, allocator=temp), FILE_GENERIC_READ | FILE_GENERIC_WRITE, FILE_SHARE_READ, creation = mode);
+    } else {
+        handle = CreateFileW(utf8_to_wide_new(name,, allocator=temp), FILE_GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+
+    if handle == INVALID_HANDLE_VALUE {
+        if log_errors {
+            error_code, error_string := System.get_error_value_and_string();
+            log_error("Could not open file \"%\": code %, %", name, error_code, error_string);
+        }
+
+        return .{}, false;
+    }
+
+    file: File;
+    file.handle = handle;
+
+    return file, true;
 }
