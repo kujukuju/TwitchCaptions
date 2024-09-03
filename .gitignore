@@ -2,3 +2,5 @@
 *.pdb
 secrets/*
 .build/
+captions.txt
+*.bin

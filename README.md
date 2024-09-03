@@ -3,6 +3,8 @@
 
 Implement https://github.com/ggerganov/whisper.cpp instead of stealing the Live Captions window + tesseract.
 
+Get whisper working with gpu and use the medium or large model...
+
 ## Setup
 
 ## Run

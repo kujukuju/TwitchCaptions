@@ -54,6 +54,8 @@ main :: () {
 
     init(*mutex);
 
+    write_entire_file("captions.txt", "");
+
     server := create_server(9000);
     server.extra_headers = .[
         .["Access-Control-Allow-Origin", "*"],
