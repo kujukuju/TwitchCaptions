@@ -53,6 +53,7 @@ use_local_english_translations: bool;
 include_notes: bool;
 step: string;
 length: string;
+vad_threshold: string;
 
 main :: () {
     init(*mutex);
@@ -87,6 +88,7 @@ main :: () {
     include_notes = false;
     step = "1200";
     length = "10000";
+    vad_threshold = "0.7";
 
     // get config
     config_lines := split(config_file, "\n");
@@ -133,6 +135,8 @@ main :: () {
                 step = part2;
             case "length";
                 length = part2;
+            case "vad_threshold";
+                vad_threshold = part2;
             case;
         }
     }
@@ -147,7 +151,11 @@ main :: () {
     }
 
     if original_language == "en" {
-        model = sprint("%.en.bin", model);
+        if file_exists(tprint("%.en.bin", model)) {
+            model = sprint("%.en.bin", model);
+        } else {
+            model = sprint("%.bin", model);
+        }
     } else {
         model = sprint("%.bin", model);
     }
@@ -160,7 +168,7 @@ main :: () {
     thread_init(*thread, (thread: *Thread) -> s64 {
         translate := ifx use_local_english_translations then "--translate" else "";
 
-        run_command_continuous("stream.exe", "-m", model, "-l", original_language, translate, "--step", step, "--length", length, lines = *command_lines, mutex = *command_mutex, capture_and_return_output = true);
+        run_command_continuous("stream.exe", "-m", model, "-l", original_language, translate, "--step", step, "--length", length, "--vad-thold", vad_threshold, lines = *command_lines, mutex = *command_mutex, capture_and_return_output = true);
         return 0;
     });
     thread_start(*thread);
@@ -171,37 +179,6 @@ main :: () {
         .["Access-Control-Allow-Methods", "GET, POST, OPTIONS"],
         .["Access-Control-Allow-Headers", "Content-Type"],
     ];
-    handle(server, .Get, "*", (request: *HttpRequest, response: *HttpResponse, path: string) -> HttpResult {
-        if contains(path, "..") {
-            return reply(response, 404);
-        }
-
-        file_path: string;
-        if path == "" || path == "/" {
-            file_path = "server/index.html";
-        } else {
-            file_path = tprint("server/%", path);
-        }
-        file, found := read_entire_file(file_path, zero_terminated = true);
-        if !found {
-            free(file);
-            return reply(response, 404);
-        }
-
-        content_type: *u8 = "text/plain";
-        if ends_with_nocase(file_path, "html") {
-            content_type = "text/html";
-        } else if ends_with_nocase(file_path, "js") {
-            content_type = "text/javascript";
-        } else if ends_with_nocase(file_path, "ttf") {
-            content_type = "font/ttf";
-        } else if ends_with_nocase(file_path, "css") {
-            content_type = "text/css";
-        }
-        
-        return reply(response, 200, .[.["Content-Type", content_type]], file.data, .Allocated);
-    });
-
     handle(server, .Get, "/captions", (request: *HttpRequest, response: *HttpResponse) -> HttpResult {
         lock(*mutex);
         defer unlock(*mutex);
@@ -293,6 +270,18 @@ read_caption_lines :: () {
             continue;
         }
 
+        is_hallucination :: (line: string) -> bool {
+            hall := contains_nocase(line, "ご視聴ありがとうございました") && line.count - 2 <= "ご視聴ありがとうございました".count;
+            hall = hall || (contains_nocase(line, "thanks for watching") && line.count - 2 <= "thanks for watching".count);
+            hall = hall || (contains_nocase(line, "見てくれてありがとう") && line.count - 2 <= "見てくれてありがとう".count);
+            hall = hall || (contains_nocase(line, "ご覧いただきありがとうございます") && line.count - 2 <= "ご覧いただきありがとうございます".count);
+            return hall;
+        }
+
+        if is_hallucination(real_line) {
+            continue;
+        }
+
         is_note_char :: (char: int) -> bool {
             return char == #char "(" ||char == #char "[" || char == #char ")" ||char == #char "]" || char == #char "*";
         }
@@ -359,6 +348,13 @@ read_caption_lines :: () {
         array_ordered_remove_by_index(*translated_lines, 0);
         array_ordered_remove_by_index(*translated, 0);
     }
+
+    if use_local_english_translations {
+        print("Translations:\n---\n");
+        for line: captured_lines {
+            print("%\n", to_string(*line));
+        }
+    }
 }
 
 translate_text :: () {
@@ -381,9 +377,11 @@ translate_text :: () {
         return;
     }
 
-    deepl_valid, deepl_response := deepl_request_post("https://api-free.deepl.com/v2/translate", tprint("Authorization: DeepL-Auth-Key %\0", deepl_secret).data, desired_translations);
+    header := tprint("Authorization: DeepL-Auth-Key %\0", deepl_secret);
+    deepl_valid, deepl_response := deepl_request_post("https://api-free.deepl.com/v2/translate", header.data, desired_translations);
     if !deepl_valid {
         print("Could not request translation!\n");
+        print("%\n", deepl_response);
         return;
     }
 
@@ -412,9 +410,7 @@ translate_text :: () {
     for line: captured_lines {
         print("%\n", to_string(*line));
     }
-
     print("---\n");
-
     for line: translated_lines {
         print("%\n", to_string(*line));
     }
@@ -514,6 +510,9 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
     curl := curl_easy_init();
     defer curl_easy_cleanup(curl);
     assert(!!curl, "Curl could not be initialized.");
+
+    curl_easy_setopt(curl, .SSL_VERIFYPEER, 0);
+    curl_easy_setopt(curl, .SSL_VERIFYHOST, 0);
     
     list: *curl_slist;
     defer curl_slist_free_all(list);
@@ -564,8 +563,6 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
     json_string := builder_to_string(*json_builder);
     defer free(json_string);
 
-    print("Request string:\n%\n", json_string);
-
     curl_easy_setopt(curl, .POSTFIELDS, json_string.data);
     curl_easy_setopt(curl, .URL, url);
 
@@ -573,8 +570,8 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
     curl_easy_setopt(curl, .WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, .WRITEDATA, *output_builder);
 
-    success := curl_easy_perform(curl) == 0;
-    return success, builder_to_string(*output_builder);
+    result := curl_easy_perform(curl);
+    return result == 0, builder_to_string(*output_builder);
 }
 
 write_callback :: (contents: *u8, count: u64, size: u64, builder: *String_Builder) -> u64 #c_call {
