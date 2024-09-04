@@ -60,10 +60,16 @@
                     const captured = [];
                     const translated = [];
 
-                    for (let i = 0; i < json.length; i += 3) {
-                        indices.push(json[i])
-                        captured.push(json[i + 1]);
-                        translated.push(json[i + 2]);
+                    for (let i = 0; i < json.length; i++) {
+                        if (json[i].length === 2) {
+                            indices.push(json[i][0]);
+                            captured.push('\u00A0');
+                            translated.push(json[i][1]);
+                        } else if (json[i].length === 3) {
+                            indices.push(json[i][0]);
+                            captured.push(json[i][1]);
+                            translated.push(json[i][2]);
+                        }
                     }
 
                     const dividerElement = document.getElementById('divider');
@@ -81,8 +87,6 @@
 
                         child = nextChild;
                     }
-
-                    console.log('huh');
 
                     for (let i = 0; i < captured.length; i++) {
                         let found = false;

@@ -41,18 +41,126 @@ mutex: Mutex;
 translation_delay :: 50;
 translation_stable_delay :: 500;
 
-include_notes :: false;
-
 command_lines: [..] string;
 command_mutex: Mutex;
+
+original_language: string;
+target_language: string;
+model: string;
+lines: int;
+display_original_language: bool;
+use_local_english_translations: bool;
+include_notes: bool;
+step: string;
+length: string;
 
 main :: () {
     init(*mutex);
     init(*command_mutex);
 
+    config_file, config_file_success := read_entire_file("config.txt");
+    if !config_file_success {
+        print("Could not load config.txt.\n");
+        return;
+    }
+
+    // remove rn
+    config_file_index := 0;
+    config_file_replace := 0;
+    while config_file_index < config_file.count - 1 {
+        if config_file[config_file_index] == #char "\r" && config_file[config_file_index + 1] == #char "\n" {
+            config_file_index += 1;
+        } else {
+            config_file_index += 1;
+            config_file_replace += 1;
+        }
+        config_file[config_file_replace] = config_file[config_file_index];
+    }
+    config_file.count -= (config_file_index - config_file_replace);
+
+    original_language = "en";
+    target_language = "ja";
+    model = "ggml-medium";
+    lines = 3;
+    display_original_language = true;
+    use_local_english_translations = false;
+    include_notes = false;
+    step = "1200";
+    length = "10000";
+
+    // get config
+    config_lines := split(config_file, "\n");
+    for line: config_lines {
+        if !line {
+            continue;
+        }
+
+        part1 := line;
+        part2 := line;
+
+        for i: 0..line.count - 1 {
+            if line[i] == #char " " {
+                part1.count = i;
+                break;
+            }
+        }
+
+        for i: 0..line.count - 1 {
+            if line[i] == #char " " {
+                part2.data = line.data + i + 1;
+                part2.count = line.count - i - 1;
+            }
+        }
+
+        to_lower_in_place(part2);
+
+        if part1 == {
+            case "original_language";
+                original_language = part2;
+            case "target_language";
+                target_language = part2;
+            case "model";
+                model = part2;
+            case "lines";
+                lines = parse_int(*part2);
+            case "display_original_language";
+                display_original_language = part2 == "true";
+            case "use_local_english_translations";
+                use_local_english_translations = part2 == "true";
+            case "include_notes";
+                include_notes = part2 == "true";
+            case "step";
+                step = part2;
+            case "length";
+                length = part2;
+            case;
+        }
+    }
+
+    if use_local_english_translations && target_language != "en" {
+        print("You enabled \"use_local_english_translations\" but \"target_language\" isn't english. You can't do this. Ignoring \"use_local_english_translations\".\n");
+        use_local_english_translations = false;
+    }
+    if use_local_english_translations && display_original_language {
+        print("You enabled \"use_local_english_translations\" and \"display_original_language\". You can't do both, because the local translations override the captions. Ignoring \"use_local_english_translations\".\n");
+        use_local_english_translations = false;
+    }
+
+    if original_language == "en" {
+        model = sprint("%.en.bin", model);
+    } else {
+        model = sprint("%.bin", model);
+    }
+
+    if !file_exists(model) {
+        print("Could not find model file %.\n", model);
+    }
+
     thread: Thread;
     thread_init(*thread, (thread: *Thread) -> s64 {
-        run_command_continuous("stream.exe", "-m", "ggml-medium.en.bin", "-l", "en", "--step", "1200", "--length", "10000", lines = *command_lines, mutex = *command_mutex, capture_and_return_output = true);
+        translate := ifx use_local_english_translations then "--translate" else "";
+
+        run_command_continuous("stream.exe", "-m", model, "-l", original_language, translate, "--step", step, "--length", length, lines = *command_lines, mutex = *command_mutex, capture_and_return_output = true);
         return 0;
     });
     thread_start(*thread);
@@ -103,13 +211,18 @@ main :: () {
         append(*builder, "[");
         for *line, index: captured_lines {
             number_string := create_fixed_string(captured_indices[index]);
+            append(*builder, "[");
             append(*builder, to_string(*number_string));
             append(*builder, ",");
+            if display_original_language {
+                append(*builder, "\"");
+                append(*builder, to_string(line));
+                append(*builder, "\",");
+            }
             append(*builder, "\"");
-            append(*builder, to_string(line));
-            append(*builder, "\",\"");
             append(*builder, to_string(*translated_lines[index]));
             append(*builder, "\"");
+            append(*builder, "]");
 
             if index < captured_lines.count - 1  {
                 append(*builder, ",");
@@ -181,7 +294,7 @@ read_caption_lines :: () {
         }
 
         is_note_char :: (char: int) -> bool {
-            return char == #char "(" ||char == #char "[" || char == #char "*";
+            return char == #char "(" ||char == #char "[" || char == #char ")" ||char == #char "]" || char == #char "*";
         }
 
         if !include_notes && is_note_char(real_line[0]) && is_note_char(real_line[real_line.count - 1]) {
@@ -205,16 +318,30 @@ read_caption_lines :: () {
         if replacement && captured_lines.count > 0 {
             exact_match := captured_lines.count > 0 && captured_lines[captured_lines.count - 1] == fixed_line;
             if !exact_match {
-                captured_lines[captured_lines.count - 1] = fixed_line;
-                changed_times[captured_lines.count - 1] = time;
-                translated[captured_lines.count - 1] = false;
+                if use_local_english_translations {
+                    translated_lines[captured_lines.count - 1] = fixed_line;
+                    changed_times[captured_lines.count - 1] = time;
+                    translated[captured_lines.count - 1] = true;
+                } else {
+                    captured_lines[captured_lines.count - 1] = fixed_line;
+                    changed_times[captured_lines.count - 1] = time;
+                    translated[captured_lines.count - 1] = false;
+                }
             }
         } else {
-            array_add(*captured_lines, fixed_line);
-            array_add(*captured_indices, next_index);
-            array_add(*changed_times, time);
-            array_add(*translated_lines, FixedString(4096).{});
-            array_add(*translated, false);
+            if use_local_english_translations {
+                array_add(*captured_lines, FixedString(4096).{});
+                array_add(*captured_indices, next_index);
+                array_add(*changed_times, time);
+                array_add(*translated_lines, fixed_line);
+                array_add(*translated, true);
+            } else {
+                array_add(*captured_lines, fixed_line);
+                array_add(*captured_indices, next_index);
+                array_add(*changed_times, time);
+                array_add(*translated_lines, FixedString(4096).{});
+                array_add(*translated, false);
+            }
 
             next_index += 1;
         }
@@ -225,7 +352,7 @@ read_caption_lines :: () {
     }
     command_lines.count = 0;
 
-    while captured_lines.count > 3 {
+    while captured_lines.count > lines {
         array_ordered_remove_by_index(*captured_lines, 0);
         array_ordered_remove_by_index(*captured_indices, 0);
         array_ordered_remove_by_index(*changed_times, 0);
@@ -259,17 +386,6 @@ translate_text :: () {
         print("Could not request translation!\n");
         return;
     }
-
-    JsonTranslation :: struct {
-        detected_source_language: string;
-        text: string;
-    }
-
-    JsonResponse :: struct {
-        translations: [..] JsonTranslation;
-    }
-
-    print("Response:\n%\n", deepl_response);
 
     translations := get_translations_from_json(get_unicode(deepl_response));
     defer {
@@ -381,9 +497,11 @@ get_translations_from_json :: (response: Unicode) -> [..] Unicode {
             }
         }
 
-        current_line.count = unicode.count - (current_line.data - unicode.data);
-        if current_line.count > 0 {
-            append(*builder, current_line);
+        if current_line.data {
+            current_line.count = unicode.count - (current_line.data - unicode.data);
+            if current_line.count > 0 {
+                append(*builder, current_line);
+            }
         }
 
         translations[index] = get_unicode(builder_to_string(*builder));
@@ -439,7 +557,9 @@ deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bo
             append(*json_builder, ", ");
         }
     }
-    append(*json_builder, "], \"target_lang\": \"JA\"}\0");
+    append(*json_builder, "], \"target_lang\": \"");
+    append(*json_builder, target_language);
+    append(*json_builder, "\"}\0");
     
     json_string := builder_to_string(*json_builder);
     defer free(json_string);

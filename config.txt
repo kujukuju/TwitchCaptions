@@ -1,0 +1,9 @@
+original_language                   ja
+target_language                     en
+model                               ggml-medium
+lines                               3
+display_original_language           false
+use_local_english_translations      true
+include_notes                       false
+step                                1200
+length                              10000
