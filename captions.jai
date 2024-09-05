@@ -31,6 +31,7 @@ translated: [..] bool;
 
 next_index := 0;
 
+deepl_paid: bool;
 deepl_secret: string;
 
 mutex: Mutex;
@@ -216,10 +217,15 @@ main :: () {
     defer server_stop(server);
 
     deepl_success: bool;
-    deepl_secret, deepl_success = read_entire_file("secrets/deepl.txt");
-    if !deepl_success {
-        print("Could not read deepl secret!\n");
-        return;
+    deepl_secret, deepl_success = read_entire_file("secrets/deepl_paid.txt");
+    if deepl_success {
+        deepl_paid = true;
+    } else {
+        deepl_secret, deepl_success = read_entire_file("secrets/deepl.txt");
+        if !deepl_success {
+            print("Could not read deepl secret!\n");
+            return;
+        }
     }
 
     while true {
@@ -271,10 +277,10 @@ read_caption_lines :: () {
         }
 
         is_hallucination :: (line: string) -> bool {
-            hall := contains_nocase(line, "ご視聴ありがとうございました") && line.count - 2 <= "ご視聴ありがとうございました".count;
-            hall = hall || (contains_nocase(line, "thanks for watching") && line.count - 2 <= "thanks for watching".count);
-            hall = hall || (contains_nocase(line, "見てくれてありがとう") && line.count - 2 <= "見てくれてありがとう".count);
-            hall = hall || (contains_nocase(line, "ご覧いただきありがとうございます") && line.count - 2 <= "ご覧いただきありがとうございます".count);
+            hall := contains_nocase(line, "thanks for watching") && line.count - 4 <= "thanks for watching".count;
+            hall = hall || (contains(line, "ご視聴ありがとうございました") && line.count - 8 <= "ご視聴ありがとうございました".count);
+            hall = hall || (contains(line, "見てくれてありがとう") && line.count - 8 <= "見てくれてありがとう".count);
+            hall = hall || (contains(line, "ご覧いただきありがとうございます") && line.count - 8 <= "ご覧いただきありがとうございます".count);
             return hall;
         }
 
@@ -378,7 +384,14 @@ translate_text :: () {
     }
 
     header := tprint("Authorization: DeepL-Auth-Key %\0", deepl_secret);
-    deepl_valid, deepl_response := deepl_request_post("https://api-free.deepl.com/v2/translate", header.data, desired_translations);
+    deepl_valid: bool;
+    deepl_response: string;
+    defer free(deepl_response);
+    if deepl_paid {
+        deepl_valid, deepl_response = deepl_request_post("https://api.deepl.com/v2/translate", header.data, desired_translations);
+    } else {
+        deepl_valid, deepl_response = deepl_request_post("https://api-free.deepl.com/v2/translate", header.data, desired_translations);
+    }
     if !deepl_valid {
         print("Could not request translation!\n");
         print("%\n", deepl_response);
