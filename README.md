@@ -35,6 +35,8 @@
 | step                              | Audio step size in milliseconds.                      | 1200, 2000, etc...                                |
 | length                            | Audio length in milliseconds.                         | 5000, 10000, etc...                               |
 | vad_threshold                     | The mic sensitivity threshold. Helps prevent ML hallucinations.   | 0.6, 0.7, etc...                       |
+| stable_captions                   | Holds the last translation on screen for a little while.     | true, false                                |
+| translation_stable_delay          | The amount of time the text must remain unchanged before it gets translated, in milliesconds.     | 100, 500, 1000, etc...    |
 
 ## 設定 (日本語)
 
@@ -50,6 +52,8 @@
 | step                              | オーディオのステップサイズ（ミリ秒単位）。           | 1200, 2000, など...                                |
 | length                            | オーディオの長さ（ミリ秒単位）。                     | 5000, 10000, など...                               |
 | vad_threshold                     | マイクの感度しきい値。MLの幻覚を防ぐのに役立ちます。   | 0.6, 0.7, など...                      |
+| stable_captions                   | 画面に最後の翻訳を少しの間保持します。        | true, false                                |
+| translation_stable_delay          | テキストが翻訳される前に変更されずに保持される必要がある時間（ミリ秒単位）。     | 100, 500, 1000, など...    |
 
 ## Supported Languages
 

@@ -8,3 +8,5 @@ include_notes                       false
 step                                1200
 length                              10000
 vad_threshold                       0.7
+stable_captions                     true
+translation_stable_delay            2000

@@ -28,10 +28,11 @@ captured_indices: [..] int;
 changed_times: [..] float64;
 translated_lines: [..] FixedString(4096);
 translated: [..] bool;
+translated_times: [..] float64;
 
 next_index := 0;
 
-deepl_paid: bool;
+deepl_secrets: [..] string;
 deepl_secret: string;
 
 mutex: Mutex;
@@ -40,7 +41,6 @@ mutex: Mutex;
 // if you want very instant translations using up a moderate amount of translation tokens you have would have like 200, 50
 // if you want very slow translations using up very few tokens you would have like 50, 500
 translation_delay :: 50;
-translation_stable_delay :: 500;
 
 command_lines: [..] string;
 command_mutex: Mutex;
@@ -55,6 +55,8 @@ include_notes: bool;
 step: string;
 length: string;
 vad_threshold: string;
+stable_captions: bool;
+translation_stable_delay: int;
 
 main :: () {
     init(*mutex);
@@ -90,6 +92,8 @@ main :: () {
     step = "1200";
     length = "10000";
     vad_threshold = "0.7";
+    stable_captions = true;
+    translation_stable_delay = 500;
 
     // get config
     config_lines := split(config_file, "\n");
@@ -138,6 +142,10 @@ main :: () {
                 length = part2;
             case "vad_threshold";
                 vad_threshold = part2;
+            case "stable_captions";
+                stable_captions = part2 == "true";
+            case "translation_stable_delay";
+                translation_stable_delay = parse_int(*part2);
             case;
         }
     }
@@ -184,11 +192,45 @@ main :: () {
         lock(*mutex);
         defer unlock(*mutex);
 
+        should_force_line :: (index: int) -> bool {
+            if !stable_captions {
+                return false;
+            }
+
+            if !translated[index] {
+                return true;
+            }
+
+            time := seconds_since_init() * 1000;
+            return time - translated_times[index] < cast(float64) max(translation_stable_delay + 1000, 1000);
+        }
+
+        valid_captured: [..] FixedString(4096);
+        defer array_free(valid_captured);
+        valid_translations: [..] FixedString(4096);
+        defer array_free(valid_translations);
+        valid_indices: [..] int;
+        defer array_free(valid_indices);
+
+        for line, index: captured_lines {
+            if captured_lines.count - index <= lines || should_force_line(index) {
+                array_add(*valid_captured, line);
+                array_add(*valid_translations, translated_lines[index]);
+                array_add(*valid_indices, captured_indices[index]);
+            }
+        }
+
+        while valid_captured.count > lines {
+            valid_captured.count -= 1;
+            valid_translations.count -= 1;
+            valid_indices.count -= 1;
+        }
+
         builder: String_Builder;
 
         append(*builder, "[");
-        for *line, index: captured_lines {
-            number_string := create_fixed_string(captured_indices[index]);
+        for *line, index: valid_captured {
+            number_string := create_fixed_string(valid_indices[index]);
             append(*builder, "[");
             append(*builder, to_string(*number_string));
             append(*builder, ",");
@@ -198,11 +240,11 @@ main :: () {
                 append(*builder, "\",");
             }
             append(*builder, "\"");
-            append(*builder, to_string(*translated_lines[index]));
+            append(*builder, to_string(*valid_translations[index]));
             append(*builder, "\"");
             append(*builder, "]");
 
-            if index < captured_lines.count - 1  {
+            if index < valid_captured.count - 1 {
                 append(*builder, ",");
             }
         }
@@ -216,17 +258,44 @@ main :: () {
     server_listen_async(server);
     defer server_stop(server);
 
-    deepl_success: bool;
-    deepl_secret, deepl_success = read_entire_file("secrets/deepl_paid.txt");
-    if deepl_success {
-        deepl_paid = true;
-    } else {
-        deepl_secret, deepl_success = read_entire_file("secrets/deepl.txt");
+    for secret_file: file_list("secrets/") {
+        deepl_secret, deepl_success := read_entire_file(secret_file);
         if !deepl_success {
-            print("Could not read deepl secret!\n");
+            print("Could not read deepl secret! %\n", secret_file);
             return;
         }
+        
+        print("Reading key %: %\n", it_index, secret_file);
+
+        array_add(*deepl_secrets, deepl_secret);
     }
+
+    best_secret: string;
+    best_secret_count: int = 0x7fffffffffffffff;
+    for secret: deepl_secrets {
+        CountJson :: struct {
+            character_count: int;
+            character_limit: int;
+        }
+
+        header := tprint("Authorization: DeepL-Auth-Key %\0", secret);
+        success, response := deepl_request_get("https://api-free.deepl.com/v2/usage", header.data);
+        if !success {
+            print("Could not get deepl secret remaining count. % %\n", success, response);
+            continue;
+        }
+
+        count_json := json_parse(response, CountJson);
+        print("Key %: Used % out of % characters.\n", it_index, count_json.character_count, count_json.character_limit);
+
+        if count_json.character_count < best_secret_count {
+            best_secret = secret;
+            best_secret_count = count_json.character_count;
+        }
+    }
+
+    deepl_secret = best_secret;
+    print("Selected best key. Used % characters.\n", best_secret_count);
 
     while true {
         reset_temporary_storage();
@@ -281,6 +350,11 @@ read_caption_lines :: () {
             hall = hall || (contains(line, "ご視聴ありがとうございました") && line.count - 8 <= "ご視聴ありがとうございました".count);
             hall = hall || (contains(line, "見てくれてありがとう") && line.count - 8 <= "見てくれてありがとう".count);
             hall = hall || (contains(line, "ご覧いただきありがとうございます") && line.count - 8 <= "ご覧いただきありがとうございます".count);
+            hall = hall || (contains(line, "ありがとうございました") && line.count - 8 <= "ありがとうございました".count);
+            hall = hall || (contains(line, "視聴してくれてありがとう") && line.count - 8 <= "視聴してくれてありがとう".count);
+            hall = hall || (contains(line, "視聴してくださってありがとうございます") && line.count - 8 <= "視聴してくださってありがとうございます".count);
+            hall = hall || (contains(line, "視聴してくださってありがとう") && line.count - 8 <= "視聴してくださってありがとう".count);
+            hall = hall || (contains(line, "最後までご視聴ありがとうございました") && line.count - 8 <= "最後までご視聴ありがとうございました".count);
             return hall;
         }
 
@@ -317,10 +391,12 @@ read_caption_lines :: () {
                     translated_lines[captured_lines.count - 1] = fixed_line;
                     changed_times[captured_lines.count - 1] = time;
                     translated[captured_lines.count - 1] = true;
+                    translated_times[captured_lines.count - 1] = time;
                 } else {
                     captured_lines[captured_lines.count - 1] = fixed_line;
                     changed_times[captured_lines.count - 1] = time;
                     translated[captured_lines.count - 1] = false;
+                    translated_times[captured_lines.count - 1] = 0;
                 }
             }
         } else {
@@ -330,12 +406,14 @@ read_caption_lines :: () {
                 array_add(*changed_times, time);
                 array_add(*translated_lines, fixed_line);
                 array_add(*translated, true);
+                array_add(*translated_times, time);
             } else {
                 array_add(*captured_lines, fixed_line);
                 array_add(*captured_indices, next_index);
                 array_add(*changed_times, time);
                 array_add(*translated_lines, FixedString(4096).{});
                 array_add(*translated, false);
+                array_add(*translated_times, 0);
             }
 
             next_index += 1;
@@ -347,12 +425,13 @@ read_caption_lines :: () {
     }
     command_lines.count = 0;
 
-    while captured_lines.count > lines {
+    while captured_lines.count > lines + 1 {
         array_ordered_remove_by_index(*captured_lines, 0);
         array_ordered_remove_by_index(*captured_indices, 0);
         array_ordered_remove_by_index(*changed_times, 0);
         array_ordered_remove_by_index(*translated_lines, 0);
         array_ordered_remove_by_index(*translated, 0);
+        array_ordered_remove_by_index(*translated_times, 0);
     }
 
     if use_local_english_translations {
@@ -373,7 +452,7 @@ translate_text :: () {
     desired_indices.allocator = temp;
 
     for captured_line, captured_index: captured_lines {
-        if !translated[captured_index] && time - changed_times[captured_index] > translation_stable_delay {
+        if !translated[captured_index] && time - changed_times[captured_index] > cast(float64) translation_stable_delay {
             array_add(*desired_translations, captured_lines[captured_index]);
             array_add(*desired_indices, captured_index);
         }
@@ -384,14 +463,8 @@ translate_text :: () {
     }
 
     header := tprint("Authorization: DeepL-Auth-Key %\0", deepl_secret);
-    deepl_valid: bool;
-    deepl_response: string;
+    deepl_valid, deepl_response := deepl_request_post("https://api-free.deepl.com/v2/translate", header.data, desired_translations);
     defer free(deepl_response);
-    if deepl_paid {
-        deepl_valid, deepl_response = deepl_request_post("https://api.deepl.com/v2/translate", header.data, desired_translations);
-    } else {
-        deepl_valid, deepl_response = deepl_request_post("https://api-free.deepl.com/v2/translate", header.data, desired_translations);
-    }
     if !deepl_valid {
         print("Could not request translation!\n");
         print("%\n", deepl_response);
@@ -417,6 +490,7 @@ translate_text :: () {
     for translation, index: translations {
         translated[desired_indices[index]] = true;
         translated_lines[desired_indices[index]] = create_fixed_string(get_string(translation), 4096);
+        translated_times[desired_indices[index]] = time;
     }
 
     print("Translations:\n---\n");
@@ -517,6 +591,29 @@ get_translations_from_json :: (response: Unicode) -> [..] Unicode {
     }
 
     return translations;
+}
+
+deepl_request_get :: (url: *u8, header: *u8) -> bool, string {
+    curl := curl_easy_init();
+    defer curl_easy_cleanup(curl);
+    assert(!!curl, "Curl could not be initialized.");
+
+    curl_easy_setopt(curl, .SSL_VERIFYPEER, 0);
+    curl_easy_setopt(curl, .SSL_VERIFYHOST, 0);
+    
+    list: *curl_slist;
+    defer curl_slist_free_all(list);
+    list = curl_slist_append(list, header);
+    curl_easy_setopt(curl, .HTTPHEADER, list);
+
+    curl_easy_setopt(curl, .URL, url);
+
+    output_builder: String_Builder;
+    curl_easy_setopt(curl, .WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, .WRITEDATA, *output_builder);
+
+    result := curl_easy_perform(curl);
+    return result == 0, builder_to_string(*output_builder);
 }
 
 deepl_request_post :: (url: *u8, header: *u8, lines: [] FixedString(4096)) -> bool, string {
